@@ -77,87 +77,268 @@ uniform vec2 u_resolution;
 uniform int u_maxBounces;
 uniform float u_ambientStrength; //Ambient fill light for better visual
 uniform vec2 u_cameraOrbit;
-
 out vec4 fragColor;
 
-const float LIGHT_POWER = 3.0;
+const float LIGHT_POWER = 3.2;
 const float FLOOR_Y = -2.0;
-const float CHECKER_SIZE = 3.0;
-const float GLASS_IOR = 1.5;  // refractive index of the glass sphere
+const float CEILING_Y = 3.6;
+const float BACK_Z = -12.0;
+const float WALL_X = 4.7;
 
 struct Ray {
-    vec3 origin;
-    vec3 direction;
-};
-
-struct Sphere {
-    vec3 center;
-    float radius;
-    vec3 color;
-};
-
-struct Cube {
-    vec3 center;
-    float halfSize;
-    vec3 color;
-    float reflectivity;
+  vec3 origin;
+  vec3 direction;
 };
 
 struct HitData {
-    bool hit;
-    float t;
-    vec3 point;
-    vec3 normal;
-    vec3 color;
-    float reflectivity;
-    bool isLight;
-    bool isGlass;
+  bool hit;
+  float t;
+  vec3 point;
+  vec3 normal;
+  vec3 color;
+  float reflectivity;
+  bool isLight;
+  bool isGlass;
 };
 
-const Sphere lightSphere = Sphere(vec3(4.0, 3.0, -4.0), 0.3, vec3(1.0, 1.0, 0.9));
-Sphere sphere;
-Sphere glassSphere;
-Cube cube;
+const vec3 LIGHT_POS = vec3(-0.3, 2.45, -6.1);
+const float LIGHT_RADIUS = 0.25;
+const vec3 LIGHT_COLOR = vec3(1.0, 0.96, 0.83);
 
-void initScene(float time) {
-    float a = time * 0.5;
-    sphere = Sphere(vec3(cos(a) * 2.5, sin(a * 1.3) * 0.8, -6.0 + sin(a) * 0.5), 1.0, vec3(1.0, 0.3, 0.3));
+bool intersectSphere(Ray ray, vec3 center, float radius, out float t, out vec3 normal) {
+  vec3 oc = ray.origin - center;
+  float b = dot(oc, ray.direction);
+  float c = dot(oc, oc) - radius * radius;
+  float discriminant = b * b - c;
+  if (discriminant < 0.0) return false;
 
-    float b = time * 0.3;
-    cube = Cube(vec3(sin(b) * 2.0, cos(b * 1.5) + 0.5, -9.0 + cos(b * 0.7)), 0.8, vec3(0.3, 0.8, 0.3), 0.85);
+  float root = sqrt(discriminant);
+  t = -b - root;
+  if (t < 0.001) t = -b + root;
+  if (t < 0.001) return false;
+  normal = normalize(ray.origin + t * ray.direction - center);
+  return true;
+}
+//slab test
+bool intersectBox(Ray ray, vec3 center, vec3 halfSize, out float t, out vec3 normal) {
+  vec3 safeDirection = ray.direction;
+  if (abs(safeDirection.x) < 0.000001) safeDirection.x = safeDirection.x < 0.0 ? -0.000001 : 0.000001;
+  if (abs(safeDirection.y) < 0.000001) safeDirection.y = safeDirection.y < 0.0 ? -0.000001 : 0.000001;
+  if (abs(safeDirection.z) < 0.000001) safeDirection.z = safeDirection.z < 0.0 ? -0.000001 : 0.000001;
+  vec3 a = (center - halfSize - ray.origin) / safeDirection;
+  vec3 b = (center + halfSize - ray.origin) / safeDirection;
+  vec3 lo = min(a, b);
+  vec3 hi = max(a, b);
+  float enter = max(max(lo.x, lo.y), lo.z);
+  float exitT = min(min(hi.x, hi.y), hi.z);
+  if (exitT < 0.001 || enter > exitT) return false;
+
+  t = enter > 0.001 ? enter : exitT;
+  vec3 local = (ray.origin + t * ray.direction - center) / halfSize;
+  vec3 mag = abs(local);
+  if (mag.x > mag.y && mag.x > mag.z) normal = vec3(sign(local.x), 0.0, 0.0);
+  else if (mag.y > mag.z) normal = vec3(0.0, sign(local.y), 0.0);
+  else normal = vec3(0.0, 0.0, sign(local.z));
+  return true;
 }
 
-bool intersectSphere(Ray ray, Sphere s, out float t) {
-    vec3 oc = ray.origin - s.center;
-    float b = dot(oc, ray.direction);
-    float d = b * b - dot(oc, oc) + s.radius * s.radius;
-    if (d < 0.0) return false;
-
-    t = -b - sqrt(d);
-    if (t < 0.001) t = -b + sqrt(d);  // ray starts inside
-    return t > 0.001;
+vec3 rotateYVec(vec3 p, float a) {
+  float c = cos(a), s = sin(a);
+  return vec3(c * p.x + s * p.z, p.y, -s * p.x + c * p.z);
 }
 
-// Slab test
-bool intersectCube(Ray ray, out float t, out vec3 normal) {
-    vec3 t0s = (cube.center - cube.halfSize - ray.origin) / ray.direction;
-    vec3 t1s = (cube.center + cube.halfSize - ray.origin) / ray.direction;
-    vec3 tmin = min(t0s, t1s);
-    vec3 tmax = max(t0s, t1s);
-    float t0 = max(max(tmin.x, tmin.y), tmin.z);
-    float t1 = min(min(tmax.x, tmax.y), tmax.z);
-    if (t1 < 0.0 || t0 > t1) return false;
-
-    t = t0 > 0.001 ? t0 : t1;
-    if (t < 0.001) return false;
-
-    vec3 local = ray.origin + ray.direction * t - cube.center;
-    vec3 a = abs(local);
-    if (a.x > a.y && a.x > a.z) normal = vec3(sign(local.x), 0.0, 0.0);
-    else if (a.y > a.z) normal = vec3(0.0, sign(local.y), 0.0);
-    else normal = vec3(0.0, 0.0, sign(local.z));
+bool intersectRotatedBox(Ray ray, vec3 center, vec3 halfSize, float angleY, out float t, out vec3 normal) {
+    Ray localRay = Ray(rotateYVec(ray.origin - center, -angleY), rotateYVec(ray.direction, -angleY));
+    vec3 localNormal;
+    if (!intersectBox(localRay, vec3(0.0), halfSize, t, localNormal)) return false;
+    normal = rotateYVec(localNormal, angleY);
     return true;
 }
+
+bool intersectEllipsoid(Ray ray, vec3 center, vec3 radii, out float t, out vec3 normal) {
+  // A sphere stretched in x, y and z used for puddles and organic matter shapes
+  vec3 origin = (ray.origin - center) / radii;
+  vec3 direction = ray.direction / radii;
+  float a = dot(direction, direction);
+  float b = dot(origin, direction);
+  float c = dot(origin, origin) - 1.0;
+  float d = b * b - a * c;
+  if (d < 0.0) return false;
+  float root = sqrt(d);
+  t = (-b - root) / a;
+  if (t < 0.001) t = (-b + root) / a;
+  if (t < 0.001) return false;
+  vec3 p = ray.origin + t * ray.direction;
+  normal = normalize((p - center) / (radii * radii));
+  return true;
+}
+
+bool intersectCylinder(Ray ray, vec3 center, float radius, float halfHeight,out float t, out vec3 normal) {
+  // Cylinder
+  vec3 o = ray.origin - center;
+  vec3 d = ray.direction;
+  float best = 1e10;
+  vec3 bestNormal = vec3(0.0);
+  bool found = false;
+
+  float a = dot(d.xz, d.xz);
+  if (a > 0.000001) {
+      float b = dot(o.xz, d.xz);
+      float c = dot(o.xz, o.xz) - radius * radius;
+      float disc = b * b - a * c;
+      if (disc >= 0.0) {
+          float root = sqrt(disc);
+          for (int k = 0; k < 2; k++) {
+              float candidate = (-b + (k == 0 ? -root : root)) / a;
+              float y = o.y + candidate * d.y;
+              if (candidate > 0.001 && candidate < best && abs(y) <= halfHeight) {
+                  best = candidate;
+                  bestNormal = normalize(vec3(o.x + candidate * d.x, 0.0, o.z + candidate * d.z));
+                  found = true;
+              }
+          }
+      }
+  }
+  if (abs(d.y) > 0.000001) {
+      for (int k = 0; k < 2; k++) {
+          float side = k == 0 ? -1.0 : 1.0;
+          float candidate = (side * halfHeight - o.y) / d.y;
+          vec2 p = o.xz + candidate * d.xz;
+          if (candidate > 0.001 && candidate < best && dot(p,p) <= radius * radius) {
+              best = candidate;
+              bestNormal = vec3(0.0, side, 0.0);
+              found = true;
+          }
+      }
+  }
+  t = best;
+  normal = bestNormal;
+  return found;
+}
+
+bool intersectCapsule(Ray ray, vec3 center, float radius, float halfBodyHeight, out float t, out vec3 normal) {
+  // Vertical cylinder for slime tubes
+  float best = 1e10;
+  vec3 bestNormal = vec3(0.0), n;
+  float candidate;
+  bool found = false;
+  if (intersectCylinder(ray, center, radius, halfBodyHeight, candidate, n) && candidate < best) {
+    best = candidate;
+    bestNormal = n;
+    found = true;
+  }
+  for (int k = 0; k < 2; k++) {
+      float side = k == 0 ? -1.0 : 1.0;
+      vec3 endCenter = center + vec3(0.0, side * halfBodyHeight, 0.0);
+      if (intersectSphere(ray, endCenter, radius, candidate, n)) {
+          float y = ray.origin.y + ray.direction.y * candidate;
+          if (side * (y - endCenter.y) >= 0.0 && candidate < best) {
+              best = candidate;
+              bestNormal = n;
+              found = true;
+          }
+      }
+  }
+  t = best;
+  normal = bestNormal;
+  return found;
+}
+
+bool intersectPlane(Ray ray, vec3 point, vec3 normal, out float t) {
+  float denom = dot(ray.direction, normal);
+  if (abs(denom) < 0.000001) return false;
+  t = dot(point - ray.origin, normal) / denom;
+  return t > 0.001;
+}
+
+void recordHit(inout HitData best, Ray ray, float t, vec3 normal, vec3 color, float reflectivity) {
+  if (t < 0.001 || t >= best.t) return;
+  best = HitData(true, t, ray.origin + ray.direction * t, normalize(normal),color, reflectivity, false, false);
+}
+
+void addBox(inout HitData best, Ray ray, vec3 center, vec3 halfSize, vec3 color, float reflectivity) {
+  float t;
+  vec3 n;
+  if (intersectBox(ray, center, halfSize, t, n))
+    recordHit(best, ray, t, n, color, reflectivity);
+}
+
+void addRotatedBox(inout HitData best, Ray ray, vec3 center, vec3 halfSize, float angleY, vec3 color, float reflectivity) {
+  float t;
+  vec3 n;
+  if (intersectRotatedBox(ray, center, halfSize, angleY, t, n))
+    recordHit(best, ray, t, n, color, reflectivity);
+}
+
+void addSphere(inout HitData best, Ray ray, vec3 center, float radius, vec3 color, float reflectivity) {
+  float t;
+  vec3 n;
+  if (intersectSphere(ray, center, radius, t, n))
+    recordHit(best, ray, t, n, color, reflectivity);
+}
+
+void addEllipsoid(inout HitData best, Ray ray, vec3 center, vec3 radii, vec3 color, float reflectivity) {
+  float t;
+  vec3 n;
+  if (intersectEllipsoid(ray, center, radii, t, n))
+    recordHit(best, ray, t, n, color, reflectivity);
+}
+
+void addCylinder(inout HitData best, Ray ray, vec3 center, float radius,float halfHeight, vec3 color, float reflectivity) {
+  float t;
+  vec3 n;
+  if (intersectCylinder(ray, center, radius, halfHeight, t, n))
+    recordHit(best, ray, t, n, color, reflectivity);
+}
+
+void addCapsule(inout HitData best, Ray ray, vec3 center, float radius, float halfBodyHeight, vec3 color, float reflectivity) {
+  float t;
+  vec3 n;
+  if (intersectCapsule(ray, center, radius, halfBodyHeight, t, n))
+    recordHit(best, ray, t, n, color, reflectivity);
+}
+
+vec3 tiles(vec2 uv, vec3 baseColor) {
+  vec2 f = fract(uv);
+  float grout = 1.0 - step(0.032, min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y)));
+  float variation = 0.94 + 0.06 * sin(floor(uv.x) * 2.41 + floor(uv.y) * 5.19);
+  return mix(baseColor * variation, baseColor * 0.27, grout);
+}
+
+void addRoom(inout HitData best, Ray ray) {
+  float t;
+  vec3 p;
+  if (intersectPlane(ray, vec3(0.0, FLOOR_Y, 0.0), vec3(0.0, 1.0, 0.0), t)) {
+    p = ray.origin + ray.direction * t;
+    if (abs(p.x) <= WALL_X && p.z >= BACK_Z && p.z <= 2.5) {
+      vec3 c = tiles(p.xz * 1.22, vec3(0.27, 0.32, 0.32));
+      recordHit(best, ray, t, vec3(0.0, 1.0, 0.0), c, 0.13);
+    }
+  }
+  if (intersectPlane(ray, vec3(0.0, CEILING_Y, 0.0), vec3(0.0, -1.0, 0.0), t)) {
+    p = ray.origin + ray.direction * t;
+    if (abs(p.x) <= WALL_X && p.z >= BACK_Z && p.z <= 2.5)
+      recordHit(best, ray, t, vec3(0.0, -1.0, 0.0), vec3(0.25, 0.26, 0.24), 0.03);
+  }
+  if (intersectPlane(ray, vec3(0.0, 0.0, BACK_Z), vec3(0.0, 0.0, 1.0), t)) {
+    p = ray.origin + ray.direction * t;
+    if (abs(p.x) <= WALL_X && p.y >= FLOOR_Y && p.y <= CEILING_Y)
+     recordHit(best, ray, t, vec3(0.0, 0.0, 1.0), tiles(vec2(p.x, p.y) * 1.20, vec3(0.39, 0.45, 0.42)), 0.05);
+  }
+  if (intersectPlane(ray, vec3(-WALL_X, 0.0, 0.0), vec3(1.0, 0.0, 0.0), t)) {
+    p = ray.origin + ray.direction * t;
+    if (p.z >= BACK_Z && p.z <= 2.5 && p.y >= FLOOR_Y && p.y <= CEILING_Y)
+      recordHit(best, ray, t, vec3(1.0, 0.0, 0.0), tiles(vec2(p.z, p.y) * 1.20, vec3(0.35, 0.40, 0.38)), 0.04);
+  }
+  if (intersectPlane(ray, vec3(WALL_X, 0.0, 0.0), vec3(-1.0, 0.0, 0.0), t)) {
+    p = ray.origin + ray.direction * t;
+    if (p.z >= BACK_Z && p.z <= 2.5 && p.y >= FLOOR_Y && p.y <= CEILING_Y)
+      recordHit(best, ray, t, vec3(-1.0, 0.0, 0.0),tiles(vec2(p.z, p.y) * 1.20, vec3(0.35, 0.40, 0.38)), 0.04);
+  }
+    
+}
+
+
 
 //eta = n1 / n2
 //vec3 refraction(vec3 I, vec3 N, float eta) {
@@ -169,107 +350,122 @@ bool intersectCube(Ray ray, out float t, out vec3 normal) {
 //    <!-- insert your code here -->
 //}
 
-bool intersectFloor(Ray ray, out float t) {
-    if (abs(ray.direction.y) < 0.0001) return false;
-    t = (FLOOR_Y - ray.origin.y) / ray.direction.y;
-    return t > 0.001;
-}
+//left off here 11/19
 
 HitData traceScene(Ray ray, bool includeLight) {
-    HitData hit;
-    hit.hit = false;
-    hit.t = 1e10;
+    HitData hit = HitData(false, 1e10, vec3(0.0), vec3(0.0), vec3(0.0), 0.0, false, false);
     float t;
     vec3 n;
 
-    if (includeLight && intersectSphere(ray, lightSphere, t) && t < hit.t) {
-        hit = HitData(true, t, ray.origin + ray.direction * t, vec3(0.0), lightSphere.color, 0.0, true, false);
+    if (includeLight && intersectSphere(ray, LIGHT_POS, LIGHT_RADIUS, t, n)) {
+      hit = HitData(true, t, ray.origin + t * ray.direction, n,LIGHT_COLOR, 0.0, true, false);
     }
 
-    if (intersectFloor(ray, t) && t < hit.t) {
-        vec3 p = ray.origin + ray.direction * t;
-        vec2 cell = floor(p.xz / CHECKER_SIZE);
-        vec3 color = mod(cell.x + cell.y, 2.0) < 1.0 ? vec3(1.0) : vec3(0.05);
-        hit = HitData(true, t, p, vec3(0.0, 1.0, 0.0), color, 0.0, false, false);
-    }
+    addRoom(hit, ray);
 
-    if (intersectCube(ray, t, n) && t < hit.t) {
-        hit = HitData(true, t, ray.origin + ray.direction * t, n, cube.color, cube.reflectivity, false, false);
-    }
+    const vec3 steel = vec3(0.43, 0.52, 0.56);
+    const vec3 darkSteel = vec3(0.19, 0.26, 0.28);
+    const vec3 mattress = vec3(0.46, 0.53, 0.49);
+    const vec3 agedWhite = vec3(0.65, 0.69, 0.62);
 
-    if (intersectSphere(ray, sphere, t) && t < hit.t) {
-        vec3 p = ray.origin + ray.direction * t;
-        hit = HitData(true, t, p, (p - sphere.center) / sphere.radius, sphere.color, 0.0, false, false);
-    }
+    // Operating table: mattress, frame, feet and headrest.
+    addBox(hit, ray, vec3(0.0, -0.80, -6.3), vec3(0.97, 0.21, 1.78), mattress, 0.09);
+    addBox(hit, ray, vec3(0.0, -1.08, -6.3), vec3(1.04, 0.09, 1.85), steel, 0.50);
+    addBox(hit, ray, vec3(-0.72, -1.53, -7.57), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
+    addBox(hit, ray, vec3(0.72, -1.53, -7.57), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
+    addBox(hit, ray, vec3(-0.72, -1.53, -5.03), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
+    addBox(hit, ray, vec3(0.72, -1.53, -5.03), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
+    addBox(hit, ray, vec3(0.0, -0.49, -8.12), vec3(1.00, 0.46, 0.10), steel, 0.40);
+    addEllipsoid(hit, ray, vec3(0.0, -0.56, -7.55), vec3(0.69, 0.13, 0.34), agedWhite, 0.08);
+
+    // Side rails, built from long boxes and cylindrical posts.
+    addBox(hit, ray, vec3(-1.10, -0.43, -6.25), vec3(0.055, 0.055, 1.21), steel, 0.58);
+    addBox(hit, ray, vec3(1.10, -0.43, -6.25), vec3(0.055, 0.055, 1.21), steel, 0.58);
+    addCylinder(hit, ray, vec3(-1.10, -0.71, -5.28), 0.055, 0.27, steel, 0.55);
+    addCylinder(hit, ray, vec3(-1.10, -0.71, -7.22), 0.055, 0.27, steel, 0.55);
+    addCylinder(hit, ray, vec3(1.10, -0.71, -5.28), 0.055, 0.27, steel, 0.55);
+    addCylinder(hit, ray, vec3(1.10, -0.71, -7.22), 0.055, 0.27, steel, 0.55);
+
+    // Cabinet at the back left, with separate doors and handles.
+    addBox(hit, ray, vec3(-3.60, -0.50, -10.15), vec3(0.85, 1.48, 0.59), darkSteel, 0.15);
+    addBox(hit, ray, vec3(-4.02, -0.48, -9.54), vec3(0.39, 1.40, 0.025), agedWhite, 0.15);
+    addBox(hit, ray, vec3(-3.17, -0.48, -9.54), vec3(0.39, 1.40, 0.025), agedWhite, 0.15);
+    addBox(hit, ray, vec3(-3.73, -0.42, -9.50), vec3(0.025, 0.27, 0.018), steel, 0.60);
+    addBox(hit, ray, vec3(-3.46, -0.42, -9.50), vec3(0.025, 0.27, 0.018), steel, 0.60);
+
+    // Stainless steel instrument cart to the right.
+    addBox(hit, ray, vec3(2.85, -0.92, -6.75), vec3(0.82, 0.075, 0.61), steel, 0.72);
+    addBox(hit, ray, vec3(2.85, -1.59, -6.75), vec3(0.73, 0.065, 0.52), darkSteel, 0.48);
+    addCylinder(hit, ray, vec3(2.21, -1.45, -6.30), 0.055, 0.46, steel, 0.45);
+    addCylinder(hit, ray, vec3(3.49, -1.45, -6.30), 0.055, 0.46, steel, 0.45);
+    addCylinder(hit, ray, vec3(2.21, -1.45, -7.20), 0.055, 0.46, steel, 0.45);
+    addCylinder(hit, ray, vec3(3.49, -1.45, -7.20), 0.055, 0.46, steel, 0.45);
+    addCylinder(hit, ray, vec3(2.84, -0.76, -6.75), 0.19, 0.07, vec3(0.25, 0.30, 0.29), 0.70);
+
+    // Rectangular medical supply case, rotated to show the reusable OBB primitive.
+    addRotatedBox(hit, ray, vec3(2.77, -0.64, -7.11), vec3(0.28, 0.13, 0.19),
+                  0.35, agedWhite, 0.20);
+
+    // Surgical ceiling fixture: cylinder lamp housing and a central light sphere.
+    addCylinder(hit, ray, vec3(-0.3, 3.21, -6.1), 0.07, 0.33, darkSteel, 0.65);
+    addCylinder(hit, ray, vec3(-0.3, 2.77, -6.1), 0.65, 0.11, steel, 0.57);
+
+    // Small material/primitive tests. They become proper blood/slime in stage 3.
+    addEllipsoid(hit, ray, vec3(0.26, -0.573, -6.10),
+                 vec3(0.46, 0.018, 0.35), vec3(0.24, 0.015, 0.023), 0.72);
+    addEllipsoid(hit, ray, vec3(1.48, -1.986, -5.25),
+                 vec3(0.74, 0.028, 0.51), vec3(0.20, 0.012, 0.020), 0.78);
+    addCapsule(hit, ray, vec3(2.70, 2.73, -10.0), 0.16, 0.58,
+               vec3(0.28, 0.052, 0.054), 0.39);
+    addSphere(hit, ray, vec3(2.69, 1.95, -10.0), 0.29,
+              vec3(0.22, 0.039, 0.048), 0.45);
 
     return hit;
 }
 
-vec3 trace(Ray ray) {
-    vec3 color = vec3(0.0);
-    vec3 attenuation = vec3(1.0);
 
-    //use loop to simulate the recursive process as GLSL doesn't support recursions
+
+vec3 trace(Ray ray) {
+  vec3 color = vec3(0.0);
+  vec3 attenuation = vec3(1.0);
+
     for (int bounce = 0; bounce < u_maxBounces; bounce++) {
         HitData hit = traceScene(ray, true);
-
         if (!hit.hit) {
-            float t = 0.5 * (ray.direction.y + 1.0);
-            color += attenuation * mix(vec3(0.09, 0.12, 0.18), vec3(0.18, 0.21, 0.27), t);  // sky
+            color += attenuation * vec3(0.015, 0.022, 0.030);
             break;
         }
-
         if (hit.isLight) {
-            color += attenuation * lightSphere.color * LIGHT_POWER;
+            color += attenuation * LIGHT_COLOR * LIGHT_POWER;
             break;
         }
 
-        // Refraction: (option 1)either reflects or refracts the ray, whichever Schlick says is stronger
-        // (option 2): finalColor = hit.color * (F * reflectionColor + (1.0 - F) * refractionColor)
-        // (option 3): Monte Carlo Sampling (multiple rays per pixel), reflect with probability F (random() < schlick_value), else refract, and average many samples per pixel
-        //<!-- if (hit.isGlass) {
-        //    <!-- insert your code here -->
-
-        //    vec3 direction;
-        //    if (total_internal_reflection || schlick_value > 0.5) {
-                //direction = reflection ray
-        //        <!-- insert your code here -->
-        //    } else {
-                //direction = refraction ray
-        //        <!-- insert your code here -->
-        //    }
-
-        //    ray = Ray(hit.point + direction * 0.001, direction);
-        ////Use Schlick approximation to determine contributions from reflection and refraction
-        //    attenuation *= hit.color;
-        //    continue;
-        //}
-
-        vec3 toLight = lightSphere.center - hit.point;
+        // One surgical light for now. Multiple colored lights come in stage 2.
+        vec3 toLight = LIGHT_POS - hit.point;
         float lightDist = length(toLight);
         vec3 lightDir = toLight / lightDist;
-
         HitData blocker = traceScene(Ray(hit.point + hit.normal * 0.001, lightDir), false);
-        float visible = blocker.hit && blocker.t < lightDist ? 0.0 : 1.0;
-        float diff = max(dot(hit.normal, lightDir), 0.0);
-        float falloff = 1.0 / (1.0 + 0.1 * lightDist * lightDist);
+        float visible = blocker.hit && blocker.t < lightDist - LIGHT_RADIUS ? 0.0 : 1.0;
+        float diffuse = max(dot(hit.normal, lightDir), 0.0);
+        float falloff = 1.0 / (1.0 + 0.075 * lightDist * lightDist);
 
-        //  (optional) Ambient fill light approximates indirect light we don't trace.
-        vec3 shading = hit.color * (LIGHT_POWER * diff * falloff * visible + u_ambientStrength);
-        color += attenuation * shading * (1.0 - hit.reflectivity);
+        // Local Phong specular lighting, using the same hit normal as shadows.
+        vec3 viewDir = normalize(-ray.direction);
+        vec3 reflectedLight = reflect(-lightDir, hit.normal);
+        float specular = pow(max(dot(viewDir, reflectedLight), 0.0), 42.0);
+        vec3 illumination = hit.color * (u_ambientStrength + LIGHT_POWER * diffuse * falloff * visible);
+        illumination += LIGHT_COLOR * (0.56 * specular * falloff * visible);
+        color += attenuation * illumination * (1.0 - hit.reflectivity);
 
-        if (hit.reflectivity == 0.0) break;
+        if (hit.reflectivity <= 0.0) break;
         attenuation *= hit.reflectivity;
-        ray = Ray(hit.point + hit.normal * 0.001, reflect(ray.direction, hit.normal));
+        ray = Ray(hit.point + hit.normal * 0.001,
+                  normalize(reflect(ray.direction, hit.normal)));
     }
-
     return color;
 }
 
 void main() {
-    initScene(u_time);
-
-    // Orbit camera around the scene center
     float cp = cos(u_cameraOrbit.x), sp = sin(u_cameraOrbit.x);
     float cy = cos(u_cameraOrbit.y), sy = sin(u_cameraOrbit.y);
     mat3 rotX = mat3(1.0, 0.0, 0.0,  0.0, cp, -sp,  0.0, sp, cp);
@@ -279,8 +475,7 @@ void main() {
     vec3 target = vec3(0.0, 0.0, -5.0);
     vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution) / u_resolution.y;
     Ray ray = Ray(target + camera * vec3(0.0, 0.0, 7.0), camera * normalize(vec3(uv, -1.5)));
-
-    fragColor = vec4(pow(trace(ray), vec3(1.0 / 2.2)), 1.0);  // gamma correction
+    fragColor = vec4(pow(max(trace(ray), vec3(0.0)), vec3(1.0 / 2.2)), 1.0);
 }
 </script>
 
