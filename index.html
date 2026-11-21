@@ -25,11 +25,14 @@
 </head>
 
 <body>
-  <h2>HW 7 Ray Tracing</h2>
+  <h2>HW 7: Operation Table</h2>
 
   <p>Edit the shaders on the left; the canvas updates as you type.<br>
     Drag with the mouse to orbit the camera around the scene.<br>
-    Use the sliders to change the max number of bounces and the ambient light strength.</p>
+    Use the sliders to change the max number of bounces and the ambient light strength.
+    You can also control the surgical light, and the red emergency light.<br>
+    Inspirired by the hospital from the Resident Evil movie 
+  </p>
 
   <div class="layout">
     <div class="editors">
@@ -55,8 +58,18 @@
         </div>
         <div class="control-row">
           <label for="ambient">Ambient Strength:</label>
-          <input type="range" id="ambient" min="0" max="1" step="0.05" value="0.05">
-          <span id="ambientValue">0.5</span>
+          <input type="range" id="ambient" min="0" max="1" step="0.005" value="0.01">
+          <span id="ambientValue">0.02</span>
+        </div>
+        <div class="control-row">
+          <label for="surgical">Surgical Light:</label>
+          <input type="range" id="surgical" min="0" max="2" step="0.025" value="1">
+          <span id="surgicalValue">1</span>
+        </div>
+        <div class="control-row">
+          <label for="red">Emergency Red Light:</label>
+          <input type="range" id="red" min="0" max="2" step="0.05" value="1">
+          <span id="redValue">1</span>
         </div>
       </div>
     </div>
@@ -75,15 +88,18 @@ precision highp float;
 uniform float u_time;
 uniform vec2 u_resolution;
 uniform int u_maxBounces;
-uniform float u_ambientStrength; //Ambient fill light for better visual
+uniform float u_ambientStrength;
+uniform float u_surgicalStrength;
+uniform float u_redStrength;
 uniform vec2 u_cameraOrbit;
 out vec4 fragColor;
 
-const float LIGHT_POWER = 3.2;
+const float LIGHT_POWER = 4.0;
 const float FLOOR_Y = -2.0;
 const float CEILING_Y = 3.6;
 const float BACK_Z = -12.0;
 const float WALL_X = 4.7;
+const float GLASS_IOR = 1.5;
 
 struct Ray {
   vec3 origin;
@@ -102,8 +118,34 @@ struct HitData {
 };
 
 const vec3 LIGHT_POS = vec3(-0.3, 2.45, -6.1);
-const float LIGHT_RADIUS = 0.25;
-const vec3 LIGHT_COLOR = vec3(1.0, 0.96, 0.83);
+const vec3 LIGHT_COLOR = vec3(0.91, 0.94, 1.0);
+const vec3 RED_LIGHT_POS = vec3(3.18, 2.28, -10.9);
+const vec3 BLUE_LIGHT_POS = vec3(-3.10, 3.20, -9.4);
+const vec3 GLASS_CENTER = vec3(2.75, -0.49, -6.55);
+const float GLASS_RADIUS = 0.35;
+
+vec3 lightPosition(int i) {
+  if (i == 0) return LIGHT_POS;
+  if (i == 1) return RED_LIGHT_POS;
+  return BLUE_LIGHT_POS;
+}
+
+vec3 lightColor(int i) {
+  if (i == 0) return LIGHT_COLOR;
+  if (i == 1) return vec3(1.0, 0.037, 0.047);
+  return vec3(0.30, 0.64, 1.0);
+}
+
+float lightPower(int i) {
+  if (i == 0)
+    return LIGHT_POWER * u_surgicalStrength;
+
+  if (i == 1)
+    return 6.5 * u_redStrength * (0.85 + 0.15 * sin(u_time * 0.75));
+
+    // light that occasionally flickers.
+  return 0.9 * (0.45 + 0.55 *step(0.1, sin(u_time * 13.0) *sin(u_time * 3.7)));
+}
 
 bool intersectSphere(Ray ray, vec3 center, float radius, out float t, out vec3 normal) {
   vec3 oc = ray.origin - center;
@@ -297,47 +339,108 @@ void addCapsule(inout HitData best, Ray ray, vec3 center, float radius, float ha
   if (intersectCapsule(ray, center, radius, halfBodyHeight, t, n))
     recordHit(best, ray, t, n, color, reflectivity);
 }
+float noise(vec2 p) {
+  return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
 
 vec3 tiles(vec2 uv, vec3 baseColor) {
   vec2 f = fract(uv);
-  float grout = 1.0 - step(0.032, min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y)));
-  float variation = 0.94 + 0.06 * sin(floor(uv.x) * 2.41 + floor(uv.y) * 5.19);
-  return mix(baseColor * variation, baseColor * 0.27, grout);
+  float edge = min(min(f.x, 1.0 - f.x), min(f.y, 1.0 - f.y));
+  float grout = 1.0 - smoothstep(0.018, 0.042, edge);
+  vec2 cell = floor(uv);
+  float variation = 0.78 + 0.22 * noise(cell);
+  float stain = 0.92 + 0.08 * sin(uv.x * 4.4 + uv.y * 2.7);
+  return mix(baseColor * variation * stain, baseColor * 0.21, grout);
 }
 
-void addRoom(inout HitData best, Ray ray) {
+float bloodShape(vec2 p, vec2 center, vec2 radii, float seed) {
+  vec2 q = (p - center) / radii;
+  float angle = atan(q.y, q.x);
+  float irregular = 1.0 + 0.16 * sin(angle * 5.0 + seed) + 0.09 * sin(angle * 9.0 - seed * 1.5) + 0.05 * sin(angle * 17.0 + seed * 2.0);
+  return 1.0 - smoothstep(irregular - 0.09, irregular + 0.04, length(q));
+}
+
+void addRoom(inout HitData best, Ray ray){
   float t;
   vec3 p;
   if (intersectPlane(ray, vec3(0.0, FLOOR_Y, 0.0), vec3(0.0, 1.0, 0.0), t)) {
     p = ray.origin + ray.direction * t;
     if (abs(p.x) <= WALL_X && p.z >= BACK_Z && p.z <= 2.5) {
-      vec3 c = tiles(p.xz * 1.22, vec3(0.27, 0.32, 0.32));
-      recordHit(best, ray, t, vec3(0.0, 1.0, 0.0), c, 0.13);
+      vec3 c = tiles(p.xz * 1.32, vec3(0.24, 0.26, 0.25));
+      float wet = 0.17;
+      float blood = max(bloodShape(p.xz, vec2(1.46, -5.13), vec2(1.13, 0.72), 0.4), max(bloodShape(p.xz, vec2(-1.25, -8.75), vec2(1.34, 0.95), 1.4),bloodShape(p.xz, vec2(0.10, -3.83), vec2(0.72, 0.57), 2.4)));
+      blood = max(blood, bloodShape(p.xz, vec2(2.80, -9.35), vec2(0.57, 1.05), 3.7));
+      c = mix(c, vec3(0.19, 0.009, 0.014) * (0.88 + 0.12 * sin(p.x * 19.0 + p.z * 13.0)), blood);
+      wet = mix(wet, 0.76, blood);
+      vec3 n = normalize(vec3(0.010 * blood * sin(p.x * 16.0), 1.0, 0.010 * blood * sin(p.z * 14.0)));
+      recordHit(best, ray, t, n, c, wet);
     }
   }
   if (intersectPlane(ray, vec3(0.0, CEILING_Y, 0.0), vec3(0.0, -1.0, 0.0), t)) {
     p = ray.origin + ray.direction * t;
     if (abs(p.x) <= WALL_X && p.z >= BACK_Z && p.z <= 2.5)
-      recordHit(best, ray, t, vec3(0.0, -1.0, 0.0), vec3(0.25, 0.26, 0.24), 0.03);
+      recordHit(best, ray, t, vec3(0.0, -1.0, 0.0),tiles(p.xz * 0.9, vec3(0.18, 0.18, 0.16)), 0.025);
   }
   if (intersectPlane(ray, vec3(0.0, 0.0, BACK_Z), vec3(0.0, 0.0, 1.0), t)) {
     p = ray.origin + ray.direction * t;
     if (abs(p.x) <= WALL_X && p.y >= FLOOR_Y && p.y <= CEILING_Y)
-     recordHit(best, ray, t, vec3(0.0, 0.0, 1.0), tiles(vec2(p.x, p.y) * 1.20, vec3(0.39, 0.45, 0.42)), 0.05);
+      recordHit(best, ray, t, vec3(0.0, 0.0, 1.0),tiles(vec2(p.x, p.y) * 1.13, vec3(0.31, 0.36, 0.32)), 0.065);
   }
   if (intersectPlane(ray, vec3(-WALL_X, 0.0, 0.0), vec3(1.0, 0.0, 0.0), t)) {
     p = ray.origin + ray.direction * t;
     if (p.z >= BACK_Z && p.z <= 2.5 && p.y >= FLOOR_Y && p.y <= CEILING_Y)
-      recordHit(best, ray, t, vec3(1.0, 0.0, 0.0), tiles(vec2(p.z, p.y) * 1.20, vec3(0.35, 0.40, 0.38)), 0.04);
+      recordHit(best, ray, t, vec3(1.0, 0.0, 0.0),tiles(vec2(p.z, p.y) * 1.10, vec3(0.30, 0.33, 0.30)), 0.06);
   }
   if (intersectPlane(ray, vec3(WALL_X, 0.0, 0.0), vec3(-1.0, 0.0, 0.0), t)) {
     p = ray.origin + ray.direction * t;
     if (p.z >= BACK_Z && p.z <= 2.5 && p.y >= FLOOR_Y && p.y <= CEILING_Y)
-      recordHit(best, ray, t, vec3(-1.0, 0.0, 0.0),tiles(vec2(p.z, p.y) * 1.20, vec3(0.35, 0.40, 0.38)), 0.04);
+      recordHit(best, ray, t, vec3(-1.0, 0.0, 0.0),tiles(vec2(p.z, p.y) * 1.10, vec3(0.30, 0.33, 0.30)), 0.06);
   }
-    
+  // Front wall
+  if (intersectPlane(ray, vec3(0.0, 0.0, 2.5),vec3(0.0, 0.0, -1.0), t)) {
+    p = ray.origin + ray.direction * t;
+    if (abs(p.x) <= WALL_X && p.y >= FLOOR_Y &&p.y <= CEILING_Y) {
+      recordHit(best, ray, t,vec3(0.0, 0.0, -1.0),tiles(vec2(p.x, p.y) * 1.10,vec3(0.28, 0.30, 0.28)),0.05);
+    }
+  }
 }
 
+
+void addEmissiveBox(inout HitData best, Ray ray, vec3 center, vec3 halfSize,vec3 emission) {
+  float t;
+  vec3 n;
+  if (intersectBox(ray, center, halfSize, t, n) && t < best.t)
+    best = HitData(true, t, ray.origin + t * ray.direction, n, emission, 0.0, true, false);
+}
+
+void addGlassSphere(inout HitData best, Ray ray) {
+  float t;
+  vec3 n;
+  if (intersectSphere(ray, GLASS_CENTER, GLASS_RADIUS, t, n) && t < best.t)
+    best = HitData(true, t, ray.origin + t * ray.direction, n, vec3(0.96, 0.99, 1.0), 0.05, false, true);
+}
+
+void addFleshEllipsoid(inout HitData best, Ray ray, vec3 center, vec3 radii) {
+  float t;
+  vec3 n;
+  if (intersectEllipsoid(ray, center, radii, t, n) && t < best.t) {
+    vec3 p = ray.origin + t * ray.direction;
+    n = normalize(n + 0.13 * vec3(sin(p.z * 13.0), sin(p.x * 17.0), cos(p.y * 15.0)));
+    float veins = 0.5 + 0.5 * sin(p.x * 12.0 + p.z * 7.0 + sin(p.y * 9.0));
+    vec3 flesh = mix(vec3(0.075, 0.008, 0.014), vec3(0.33, 0.060, 0.065), veins);
+    recordHit(best, ray, t, n, flesh, 0.49);
+  }
+}
+
+void addFleshCapsule(inout HitData best, Ray ray, vec3 center, float radius, float halfHeight) {
+  float t;
+  vec3 n;
+  if (intersectCapsule(ray, center, radius, halfHeight, t, n) && t < best.t) {
+    vec3 p = ray.origin + t * ray.direction;
+    n = normalize(n + 0.09 * vec3(sin(p.y * 19.0), 0.0, cos(p.y * 15.0)));
+    recordHit(best, ray, t, n, vec3(0.23, 0.024, 0.035), 0.62);
+  }
+}
 
 
 //eta = n1 / n2
@@ -353,129 +456,260 @@ void addRoom(inout HitData best, Ray ray) {
 //left off here 11/19
 
 HitData traceScene(Ray ray, bool includeLight) {
-    HitData hit = HitData(false, 1e10, vec3(0.0), vec3(0.0), vec3(0.0), 0.0, false, false);
-    float t;
-    vec3 n;
+  HitData hit = HitData(false, 1e10, vec3(0.0), vec3(0.0), vec3(0.0), 0.0, false, false);
+  float t;
+  vec3 n;
 
-    if (includeLight && intersectSphere(ray, LIGHT_POS, LIGHT_RADIUS, t, n)) {
-      hit = HitData(true, t, ray.origin + t * ray.direction, n,LIGHT_COLOR, 0.0, true, false);
+  if (includeLight) {
+    for (int i = 0; i < 3; i++) {
+      float r = i == 0 ? 0.23 : 0.13;
+      if (intersectSphere(ray, lightPosition(i), r, t, n) && t < hit.t) {
+        hit = HitData(true, t, ray.origin + t * ray.direction, n, lightColor(i) * lightPower(i), 0.0, true, false);
+      }
     }
+  }
 
-    addRoom(hit, ray);
+  addRoom(hit, ray);
 
-    const vec3 steel = vec3(0.43, 0.52, 0.56);
-    const vec3 darkSteel = vec3(0.19, 0.26, 0.28);
-    const vec3 mattress = vec3(0.46, 0.53, 0.49);
-    const vec3 agedWhite = vec3(0.65, 0.69, 0.62);
+  const vec3 steel = vec3(0.39, 0.46, 0.48);
+  const vec3 darkSteel = vec3(0.13, 0.19, 0.21);
+  const vec3 mattress = vec3(0.34, 0.39, 0.36);
+  const vec3 agedWhite = vec3(0.53, 0.55, 0.48);
 
-    // Operating table: mattress, frame, feet and headrest.
-    addBox(hit, ray, vec3(0.0, -0.80, -6.3), vec3(0.97, 0.21, 1.78), mattress, 0.09);
-    addBox(hit, ray, vec3(0.0, -1.08, -6.3), vec3(1.04, 0.09, 1.85), steel, 0.50);
-    addBox(hit, ray, vec3(-0.72, -1.53, -7.57), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
-    addBox(hit, ray, vec3(0.72, -1.53, -7.57), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
-    addBox(hit, ray, vec3(-0.72, -1.53, -5.03), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
-    addBox(hit, ray, vec3(0.72, -1.53, -5.03), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
-    addBox(hit, ray, vec3(0.0, -0.49, -8.12), vec3(1.00, 0.46, 0.10), steel, 0.40);
-    addEllipsoid(hit, ray, vec3(0.0, -0.56, -7.55), vec3(0.69, 0.13, 0.34), agedWhite, 0.08);
+  // Operating table, headrest, frame, legs, and metal side rails.
+  addBox(hit, ray, vec3(0.0, -0.80, -6.3), vec3(0.97, 0.21, 1.78), mattress, 0.12);
+  addBox(hit, ray, vec3(0.0, -1.08, -6.3), vec3(1.04, 0.09, 1.85), steel, 0.54);
+  addBox(hit, ray, vec3(-0.72, -1.53, -7.57), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
+  addBox(hit, ray, vec3(0.72, -1.53, -7.57), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
+  addBox(hit, ray, vec3(-0.72, -1.53, -5.03), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
+  addBox(hit, ray, vec3(0.72, -1.53, -5.03), vec3(0.14, 0.44, 0.14), darkSteel, 0.48);
+  addBox(hit, ray, vec3(0.0, -0.49, -8.12), vec3(1.00, 0.46, 0.10), steel, 0.42);
+  addEllipsoid(hit, ray, vec3(0.0, -0.56, -7.55), vec3(0.69, 0.13, 0.34), agedWhite, 0.08);
+  addBox(hit, ray, vec3(-1.10, -0.43, -6.25), vec3(0.055, 0.055, 1.21), steel, 0.63);
+  addBox(hit, ray, vec3(1.10, -0.43, -6.25), vec3(0.055, 0.055, 1.21), steel, 0.63);
+  for (int i = 0; i < 4; i++) {
+      float x = i < 2 ? -1.10 : 1.10;
+      float z = (i == 0 || i == 2) ? -5.28 : -7.22;
+      addCylinder(hit, ray, vec3(x, -0.71, z), 0.055, 0.27, steel, 0.57);
+  }
 
-    // Side rails, built from long boxes and cylindrical posts.
-    addBox(hit, ray, vec3(-1.10, -0.43, -6.25), vec3(0.055, 0.055, 1.21), steel, 0.58);
-    addBox(hit, ray, vec3(1.10, -0.43, -6.25), vec3(0.055, 0.055, 1.21), steel, 0.58);
-    addCylinder(hit, ray, vec3(-1.10, -0.71, -5.28), 0.055, 0.27, steel, 0.55);
-    addCylinder(hit, ray, vec3(-1.10, -0.71, -7.22), 0.055, 0.27, steel, 0.55);
-    addCylinder(hit, ray, vec3(1.10, -0.71, -5.28), 0.055, 0.27, steel, 0.55);
-    addCylinder(hit, ray, vec3(1.10, -0.71, -7.22), 0.055, 0.27, steel, 0.55);
+  // Blood on mattress: an irregular thin pool and two different clots.
+  if (intersectPlane(ray, vec3(0.0, -0.585, 0.0), vec3(0.0, 1.0, 0.0), t)) {
+    vec3 p = ray.origin + t * ray.direction;
+    float pool = max(bloodShape(p.xz, vec2(0.21, -6.16), vec2(0.74, 0.69), 1.1), bloodShape(p.xz, vec2(-0.30, -7.02), vec2(0.41, 0.39), 2.3));
+      if (abs(p.x) < 0.93 && p.z > -8.0 && p.z < -4.65 && pool > 0.35)
+        recordHit(hit, ray, t, vec3(0.0, 1.0, 0.0),
+      vec3(0.21, 0.008, 0.016) * (0.78 + 0.22 * pool), 0.79);
+    }
+  addFleshEllipsoid(hit, ray, vec3(-0.16, -0.548, -5.73), vec3(0.24, 0.055, 0.19));
 
-    // Cabinet at the back left, with separate doors and handles.
-    addBox(hit, ray, vec3(-3.60, -0.50, -10.15), vec3(0.85, 1.48, 0.59), darkSteel, 0.15);
-    addBox(hit, ray, vec3(-4.02, -0.48, -9.54), vec3(0.39, 1.40, 0.025), agedWhite, 0.15);
-    addBox(hit, ray, vec3(-3.17, -0.48, -9.54), vec3(0.39, 1.40, 0.025), agedWhite, 0.15);
-    addBox(hit, ray, vec3(-3.73, -0.42, -9.50), vec3(0.025, 0.27, 0.018), steel, 0.60);
-    addBox(hit, ray, vec3(-3.46, -0.42, -9.50), vec3(0.025, 0.27, 0.018), steel, 0.60);
+  // Cabinet on the left.
+  addBox(hit, ray, vec3(-3.60, -0.50, -10.15), vec3(0.85, 1.48, 0.59), darkSteel, 0.16);
+  addBox(hit, ray, vec3(-4.02, -0.48, -9.54), vec3(0.39, 1.40, 0.025), agedWhite, 0.16);
+  addBox(hit, ray, vec3(-3.17, -0.48, -9.54), vec3(0.39, 1.40, 0.025), agedWhite, 0.16);
+  addBox(hit, ray, vec3(-3.73, -0.42, -9.50), vec3(0.025, 0.27, 0.018), steel, 0.62);
+  addBox(hit, ray, vec3(-3.46, -0.42, -9.50), vec3(0.025, 0.27, 0.018), steel, 0.62);
 
-    // Stainless steel instrument cart to the right.
-    addBox(hit, ray, vec3(2.85, -0.92, -6.75), vec3(0.82, 0.075, 0.61), steel, 0.72);
-    addBox(hit, ray, vec3(2.85, -1.59, -6.75), vec3(0.73, 0.065, 0.52), darkSteel, 0.48);
-    addCylinder(hit, ray, vec3(2.21, -1.45, -6.30), 0.055, 0.46, steel, 0.45);
-    addCylinder(hit, ray, vec3(3.49, -1.45, -6.30), 0.055, 0.46, steel, 0.45);
-    addCylinder(hit, ray, vec3(2.21, -1.45, -7.20), 0.055, 0.46, steel, 0.45);
-    addCylinder(hit, ray, vec3(3.49, -1.45, -7.20), 0.055, 0.46, steel, 0.45);
-    addCylinder(hit, ray, vec3(2.84, -0.76, -6.75), 0.19, 0.07, vec3(0.25, 0.30, 0.29), 0.70);
+    // Stainless-steel medical cart on the right.
+  addBox(hit, ray, vec3(2.85, -0.92, -6.75), vec3(0.82, 0.075, 0.61), steel, 0.78);
+  addBox(hit, ray, vec3(2.85, -1.59, -6.75), vec3(0.73, 0.065, 0.52), darkSteel, 0.56);
+  for (int i = 0; i < 4; i++) {
+    float x = i < 2 ? 2.21 : 3.49;
+    float z = (i == 0 || i == 2) ? -6.30 : -7.20;
+    addCylinder(hit, ray, vec3(x, -1.45, z), 0.055, 0.46, steel, 0.61);
+  }
+  addRotatedBox(hit, ray, vec3(3.24, -0.64, -7.11), vec3(0.28, 0.13, 0.19),0.35, agedWhite, 0.23);
 
-    // Rectangular medical supply case, rotated to show the reusable OBB primitive.
-    addRotatedBox(hit, ray, vec3(2.77, -0.64, -7.11), vec3(0.28, 0.13, 0.19),
-                  0.35, agedWhite, 0.20);
+  // Transparent glass sphere
+  // Shadow rays skip the glass shell (it is transparent).
+  if (includeLight) addGlassSphere(hit, ray);
+  addSphere(hit, ray, GLASS_CENTER + vec3(0.0, -0.022, 0.0), 0.115,vec3(0.69, 0.085, 0.13), 0.22);
+  addCylinder(hit, ray, vec3(2.75, -0.815, -6.55), 0.19, 0.045, darkSteel, 0.70);
 
-    // Surgical ceiling fixture: cylinder lamp housing and a central light sphere.
-    addCylinder(hit, ray, vec3(-0.3, 3.21, -6.1), 0.07, 0.33, darkSteel, 0.65);
-    addCylinder(hit, ray, vec3(-0.3, 2.77, -6.1), 0.65, 0.11, steel, 0.57);
+  // Door, seams, and near-black opening at the end of the room.
+  addBox(hit, ray, vec3(0.64, -0.28, -11.91), vec3(0.98, 1.71, 0.07), darkSteel, 0.11);
+  addBox(hit, ray, vec3(-0.38, -0.28, -11.82), vec3(0.045, 1.81, 0.12), steel, 0.44);
+  addBox(hit, ray, vec3(1.67, -0.28, -11.82), vec3(0.045, 1.81, 0.12), steel, 0.44);
+  addBox(hit, ray, vec3(0.64, 1.49, -11.82), vec3(1.07, 0.06, 0.12), steel, 0.44);
+  addBox(hit, ray, vec3(1.33, -0.13, -11.80), vec3(0.040, 0.25, 0.04), agedWhite, 0.64);
 
-    // Small material/primitive tests. They become proper blood/slime in stage 3.
-    addEllipsoid(hit, ray, vec3(0.26, -0.573, -6.10),
-                 vec3(0.46, 0.018, 0.35), vec3(0.24, 0.015, 0.023), 0.72);
-    addEllipsoid(hit, ray, vec3(1.48, -1.986, -5.25),
-                 vec3(0.74, 0.028, 0.51), vec3(0.20, 0.012, 0.020), 0.78);
-    addCapsule(hit, ray, vec3(2.70, 2.73, -10.0), 0.16, 0.58,
-               vec3(0.28, 0.052, 0.054), 0.39);
-    addSphere(hit, ray, vec3(2.69, 1.95, -10.0), 0.29,
-              vec3(0.22, 0.039, 0.048), 0.45);
+  // Medical monitor (green)
+  addBox(hit, ray, vec3(-2.10, 0.77, -11.66), vec3(0.74, 0.48, 0.16), darkSteel, 0.13);
+  if (includeLight)
+    addEmissiveBox(hit, ray, vec3(-2.10, 0.77, -11.49), vec3(0.61, 0.35, 0.012),vec3(0.034, 0.19, 0.14));
 
-    return hit;
+  // Metallic ceiling surgical fixture, plus emergency / fluorescent housings.
+  addCylinder(hit, ray, vec3(-0.3, 3.20, -6.1), 0.075, 0.32, darkSteel, 0.64);
+  addCylinder(hit, ray, vec3(-0.3, 2.78, -6.1), 0.66, 0.11, steel, 0.61);
+  addBox(hit, ray, vec3(3.18, 2.56, -11.05), vec3(0.48, 0.08, 0.12), darkSteel, 0.25);
+  addBox(hit, ray, vec3(-3.1, 3.43, -9.4), vec3(0.76, 0.06, 0.22), steel, 0.42);
+  if (includeLight) {
+    addEmissiveBox(hit, ray, vec3(0.64, 1.82, -11.77), vec3(0.55, 0.085, 0.045),vec3(1.3, 0.025, 0.035));
+  }
+
+  // Organic corruption across ceiling: chunky, glossy, non-uniform growths.
+  float pulse = 1.0 + 0.025 * sin(u_time * 1.6);
+  addFleshEllipsoid(hit, ray, vec3(-3.00, 3.48, -10.70), vec3(1.50, 0.55, 1.07) * pulse);
+  addFleshEllipsoid(hit, ray, vec3(-1.53, 3.42, -10.95), vec3(1.22, 0.43, 0.76));
+  addFleshEllipsoid(hit, ray, vec3(2.84, 3.46, -9.38), vec3(1.61, 0.58, 1.24) * pulse);
+  addFleshEllipsoid(hit, ray, vec3(3.24, 3.40, -6.74), vec3(1.21, 0.57, 1.40));
+  addFleshEllipsoid(hit, ray, vec3(-0.36, 3.49, -8.47), vec3(0.95, 0.40, 1.23));
+  addFleshEllipsoid(hit, ray, vec3(1.16, 3.47, -10.32), vec3(0.85, 0.39, 0.71));
+  addFleshEllipsoid(hit, ray, vec3(-2.65, 3.44, -6.63), vec3(1.10, 0.35, 0.84));
+  // Hanging fleshy tendrils with moving rounded ends.
+  addFleshCapsule(hit, ray, vec3(-2.78, 2.79, -10.50), 0.17, 0.50);
+  addFleshCapsule(hit, ray, vec3(3.18, 2.64, -9.15), 0.20, 0.63);
+  addFleshCapsule(hit, ray, vec3(2.70, 2.86, -6.95), 0.14, 0.39);
+  addFleshCapsule(hit, ray, vec3(-0.60, 2.83 + 0.06 * sin(u_time), -8.56), 0.12, 0.36);
+  addFleshEllipsoid(hit, ray, vec3(3.18, 1.91, -9.15), vec3(0.27, 0.34, 0.25));
+  addFleshEllipsoid(hit, ray, vec3(-2.78, 2.20, -10.50), vec3(0.25, 0.27, 0.27));
+
+  return hit;
+}
+//shadows
+bool inShadow(Ray ray, float lightDist) {
+  float t;
+  vec3 n;
+    // Ignore room planes: the lights and the points being shaded are inside the room.
+  if (intersectBox(ray, vec3(0.0, -0.80, -6.3), vec3(0.97, 0.21, 1.78), t, n) && t < lightDist) return true;
+  if (intersectBox(ray, vec3(0.0, -1.08, -6.3), vec3(1.04, 0.09, 1.85), t, n) && t < lightDist) return true;
+  if (intersectBox(ray, vec3(-3.60, -0.50, -10.15), vec3(0.85, 1.48, 0.59), t, n) && t < lightDist) return true;
+  if (intersectBox(ray, vec3(2.85, -0.92, -6.75), vec3(0.82, 0.075, 0.61), t, n) && t < lightDist) return true;
+  if (intersectBox(ray, vec3(0.64, -0.28, -11.91), vec3(0.98, 1.71, 0.07), t, n) && t < lightDist) return true;
+  if (intersectBox(ray, vec3(-2.10, 0.77, -11.66), vec3(0.74, 0.48, 0.16), t, n) && t < lightDist) return true;
+  if (intersectCylinder(ray, vec3(-0.3, 2.78, -6.1), 0.66, 0.11, t, n) && t < lightDist) return true;
+  if (intersectEllipsoid(ray, vec3(-3.00, 3.48, -10.70), vec3(1.50, 0.55, 1.07), t, n) && t < lightDist) return true;
+  if (intersectEllipsoid(ray, vec3(2.84, 3.46, -9.38), vec3(1.61, 0.58, 1.24), t, n) && t < lightDist) return true;
+  if (intersectEllipsoid(ray, vec3(3.24, 3.40, -6.74), vec3(1.21, 0.57, 1.40), t, n) && t < lightDist) return true;
+  return false;
+}
+
+float schlick(float cosine, float ref_idx) {
+  float r0 = (1.0 - ref_idx) / (1.0 + ref_idx);
+  r0 *= r0;
+  return r0 + (1.0 - r0) * pow(1.0 - cosine, 5.0);
+}
+
+vec3 localLighting(HitData hit, Ray ray) {
+  vec3 color = hit.color * u_ambientStrength;
+  vec3 V = normalize(-ray.direction);
+  for (int i = 0; i < 3; i++) {
+    vec3 toLight = lightPosition(i) - hit.point;
+    float d = length(toLight);
+    vec3 L = toLight / d;
+    if (dot(hit.normal, L) <= 0.0) continue;
+    float visible = inShadow(Ray(hit.point + hit.normal * 0.001, L), d - 0.18) ? 0.0 : 1.0;
+    float attenuation = 1.0 / (1.0 + 0.15 * d * d);
+    float diff = max(dot(hit.normal, L), 0.0);
+    vec3 R = reflect(-L, hit.normal);
+    float spec = pow(max(dot(V, R), 0.0), hit.reflectivity > 0.45 ? 70.0 : 28.0);
+    float spot = 1.0;
+    if (i == 0) {
+    spot = smoothstep(0.48, 0.88,dot(normalize(hit.point - LIGHT_POS),vec3(0.0, -1.0, 0.0)));
+    }else if (i == 2) {
+    spot = smoothstep(0.10, 0.76,dot(normalize(hit.point - BLUE_LIGHT_POS),vec3(0.0, -1.0, 0.0)));
+    }
+    vec3 light = lightColor(i) * lightPower(i) * attenuation * visible * spot;
+    color += (hit.color * diff + vec3(0.40) * spec) * light;
+  }
+  return color;
 }
 
 
 
 vec3 trace(Ray ray) {
   vec3 color = vec3(0.0);
-  vec3 attenuation = vec3(1.0);
 
-    for (int bounce = 0; bounce < u_maxBounces; bounce++) {
-        HitData hit = traceScene(ray, true);
-        if (!hit.hit) {
-            color += attenuation * vec3(0.015, 0.022, 0.030);
-            break;
+
+  Ray rays[6];
+  vec3 weights[6];
+  int depths[6];
+  int count = 1;
+  rays[0] = ray;
+  weights[0] = vec3(1.0);
+  depths[0] = 0;
+
+  for (int path = 0; path < 10; path++) {
+    if (count == 0) break;
+    count--;
+    Ray currentRay = rays[count];
+    vec3 attenuation = weights[count];
+    int startDepth = depths[count];
+
+    for (int bounce = 0; bounce < 8; bounce++) {
+      if (bounce + startDepth >= u_maxBounces) break;
+      if (max(max(attenuation.r, attenuation.g), attenuation.b) < 0.006) break;
+      HitData hit = traceScene(currentRay, true);
+
+      if (!hit.hit) {
+        color += attenuation * vec3(0.007, 0.012, 0.017);
+        break;
+      }
+      if (hit.isLight) {
+        color += attenuation * hit.color;
+        break;
+      }
+
+      if (hit.isGlass) {
+        bool entering = dot(currentRay.direction, hit.normal) < 0.0;
+        vec3 N = entering ? hit.normal : -hit.normal;
+        float eta = entering ? 1.0 / GLASS_IOR : GLASS_IOR;
+        float cosine = max(dot(-currentRay.direction, N), 0.0);
+        vec3 reflected = normalize(reflect(currentRay.direction, N));
+        vec3 refracted = refract(currentRay.direction, N, eta);
+        bool internalReflection = dot(refracted, refracted) < 0.0001;
+        float F = internalReflection ? 1.0 : schlick(cosine, GLASS_IOR);
+
+        if (!internalReflection && count < 6 &&bounce + startDepth + 1 < u_maxBounces &&max(max(attenuation.r, attenuation.g), attenuation.b) * F > 0.009) {
+          // Preserve reflected path.
+          rays[count] = Ray(hit.point + reflected * 0.001, reflected);
+          weights[count] = attenuation * F;
+          depths[count] = bounce + startDepth + 1;
+          count++;
         }
-        if (hit.isLight) {
-            color += attenuation * LIGHT_COLOR * LIGHT_POWER;
-            break;
+        if (internalReflection) {
+          currentRay = Ray(hit.point + reflected * 0.001, reflected);
+        } else {
+          // Continue through both surfaces of the sphere.
+          attenuation *= (1.0 - F) * hit.color;
+          currentRay = Ray(hit.point + refracted * 0.001, normalize(refracted));
         }
+        continue;
+      }
 
-        // One surgical light for now. Multiple colored lights come in stage 2.
-        vec3 toLight = LIGHT_POS - hit.point;
-        float lightDist = length(toLight);
-        vec3 lightDir = toLight / lightDist;
-        HitData blocker = traceScene(Ray(hit.point + hit.normal * 0.001, lightDir), false);
-        float visible = blocker.hit && blocker.t < lightDist - LIGHT_RADIUS ? 0.0 : 1.0;
-        float diffuse = max(dot(hit.normal, lightDir), 0.0);
-        float falloff = 1.0 / (1.0 + 0.075 * lightDist * lightDist);
-
-        // Local Phong specular lighting, using the same hit normal as shadows.
-        vec3 viewDir = normalize(-ray.direction);
-        vec3 reflectedLight = reflect(-lightDir, hit.normal);
-        float specular = pow(max(dot(viewDir, reflectedLight), 0.0), 42.0);
-        vec3 illumination = hit.color * (u_ambientStrength + LIGHT_POWER * diffuse * falloff * visible);
-        illumination += LIGHT_COLOR * (0.56 * specular * falloff * visible);
-        color += attenuation * illumination * (1.0 - hit.reflectivity);
-
-        if (hit.reflectivity <= 0.0) break;
-        attenuation *= hit.reflectivity;
-        ray = Ray(hit.point + hit.normal * 0.001,
-                  normalize(reflect(ray.direction, hit.normal)));
+      color += attenuation * localLighting(hit, currentRay) * (1.0 - hit.reflectivity);
+      if (hit.reflectivity <= 0.0) break;
+      attenuation *= hit.reflectivity;
+      vec3 reflected = normalize(reflect(currentRay.direction, hit.normal));
+      currentRay = Ray(hit.point + reflected * 0.001, reflected);
     }
-    return color;
+  }
+  return color;
 }
 
 void main() {
-    float cp = cos(u_cameraOrbit.x), sp = sin(u_cameraOrbit.x);
-    float cy = cos(u_cameraOrbit.y), sy = sin(u_cameraOrbit.y);
-    mat3 rotX = mat3(1.0, 0.0, 0.0,  0.0, cp, -sp,  0.0, sp, cp);
-    mat3 rotY = mat3(cy, 0.0, -sy,  0.0, 1.0, 0.0,  sy, 0.0, cy);
-    mat3 camera = rotY * rotX;
+  float cp = cos(u_cameraOrbit.x), sp = sin(u_cameraOrbit.x);
+  float cy = cos(u_cameraOrbit.y), sy = sin(u_cameraOrbit.y);
+  mat3 rotX = mat3(1.0, 0.0, 0.0,  0.0, cp, -sp,  0.0, sp, cp);
+  mat3 rotY = mat3(cy, 0.0, -sy,  0.0, 1.0, 0.0,  sy, 0.0, cy);
+  mat3 camera = rotY * rotX;
 
-    vec3 target = vec3(0.0, 0.0, -5.0);
-    vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution) / u_resolution.y;
-    Ray ray = Ray(target + camera * vec3(0.0, 0.0, 7.0), camera * normalize(vec3(uv, -1.5)));
-    fragColor = vec4(pow(max(trace(ray), vec3(0.0)), vec3(1.0 / 2.2)), 1.0);
+  vec3 target = vec3(0.0, 0.0, -5.0);
+  vec2 uv = (gl_FragCoord.xy - 0.5 * u_resolution) / u_resolution.y;
+  vec3 cameraPosition = target + camera * vec3(0.0, 0.0, 7.0);
+  // Keep the camera inside the hospital room.
+  cameraPosition = clamp(cameraPosition,vec3(-WALL_X + 0.25, FLOOR_Y + 0.25, BACK_Z + 0.25),vec3(WALL_X - 0.25, CEILING_Y - 0.25, 2.25));
+
+  Ray ray = Ray(cameraPosition,camera * normalize(vec3(uv, -1.5)));
+  vec3 color = vec3(1.0) - exp(-trace(ray) * 0.90);
+
+  // Darken the edges of the image.
+  float vignette = 1.0 - 0.42 * smoothstep(0.20, 0.90, length(uv));
+
+  color *= vignette;
+
+  // Gamma correction
+  fragColor = vec4(pow(max(color, vec3(0.0)), vec3(1.0 / 2.2)),1.0);
 }
 </script>
 
@@ -531,8 +765,11 @@ void main() {
 
   const bounces = document.getElementById("bounces");
   const ambient = document.getElementById("ambient");
-  for (const slider of [bounces, ambient]) {
-    slider.addEventListener("input", () => document.getElementById(slider.id + "Value").textContent = slider.value);
+  const surgical = document.getElementById("surgical");
+  const red = document.getElementById("red");
+
+  for (const slider of [bounces, ambient, surgical, red]) {
+    slider.addEventListener("input", () =>document.getElementById(slider.id + "Value").textContent = slider.value);
   }
 
   // Dragging orbits the camera
@@ -553,6 +790,8 @@ void main() {
     gl.uniform2f(uniform("u_resolution"), canvas.width, canvas.height);
     gl.uniform1i(uniform("u_maxBounces"), bounces.value);
     gl.uniform1f(uniform("u_ambientStrength"), ambient.value);
+    gl.uniform1f(uniform("u_surgicalStrength"), surgical.value);
+    gl.uniform1f(uniform("u_redStrength"), red.value);
     gl.uniform2f(uniform("u_cameraOrbit"), pitch, yaw);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
